@@ -6,6 +6,11 @@ from functools import partial
 from .action import Action, LoginAction, LogoffAction, SimpleAction
 from .event import Event, EventListener
 from .response import Response, FutureResponse
+import logging
+import sys, traceback
+
+_logger = logging.getLogger(__name__)
+
 
 try:
     unicode = unicode
@@ -91,6 +96,7 @@ class AMIClient(object):
 
     def connect(self):
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._socket.settimeout(5)
         self._socket.connect((self._address, self._port))
         self.finished = threading.Event()
         self._thread = threading.Thread(target=self.listen)
@@ -162,6 +168,7 @@ class AMIClient(object):
         while not self.finished.is_set():
             recv = self._socket.recv(self._buffer_size)
             if recv == b'':
+                _logger.info("Did receive empty string in first iter!")
                 self.finished.set()
                 continue
             data += recv
@@ -175,25 +182,31 @@ class AMIClient(object):
                 yield self._decode_pack(pack)
             recv = self._socket.recv(self._buffer_size)
             if recv == b'':
+                _logger.info("Did receive empty string in second iter!")
                 self.finished.set()
                 continue
             data += recv
         self._socket.close()
 
     def listen(self):
-        pack_generator = self._next_pack()
-        asterisk_start = next(pack_generator)
-        match = AMIClient.asterisk_start_regex.match(asterisk_start)
-        if not match:
-            raise Exception()
-        self._ami_version = match.group('version')
-        self._fire_on_connect()
+        try:
+            pack_generator = self._next_pack()
+            asterisk_start = next(pack_generator)
+            match = AMIClient.asterisk_start_regex.match(asterisk_start)
+            if not match:
+                raise Exception("Asterisk Start Exception")
+            self._ami_version = match.group('version')
+            self._fire_on_connect()
+        except Exception, e:
+            _logger.error("Exception on first packet: %s", e)
+            self._fire_on_disconnect(error=e)
         try:
             while not self.finished.is_set():
                 pack = next(pack_generator)
                 self.fire_recv_pack(pack)
             self._fire_on_disconnect(error=None)
         except Exception as ex:
+            _logger.info("Got Exception: %s", ex)
             self._fire_on_disconnect(error=ex)
 
     def fire_recv_reponse(self, response):
@@ -309,9 +322,14 @@ class AutoReconnect(threading.Thread):
             f = self._ami_client.send_action(Action('Ping'))
             response = f.response
             if response is not None and not response.is_error():
+                _logger.info("PING success")
                 return True
+            _logger.error("PING failed")
+            self._ami_client.disconnect()
             self.on_disconnect(self._ami_client, response)
         except Exception as ex:
+            _logger.error("PING failed. %s", ex)
+            self._ami_client.disconnect()
             self.on_disconnect(self._ami_client, ex)
         return False
 
